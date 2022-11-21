@@ -1,0 +1,693 @@
+\begin{appendices}
+
+\section{Data Pre-processing}
+\subsection{Stationarity}
+\begin{minted}[
+frame=lines,
+framesep=2mm,
+baselinestretch=1.2,
+fontsize=\footnotesize,
+linenos
+]{python}
+# Import modules
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.stattools import adfuller
+
+# Load csv
+df = pd.read_csv('df_master.csv')
+
+# Define ADF test for multiple significance levels
+def ad_test(df, col):
+  name = str(col)
+  dataset = df[col]
+  result = True
+  dftest = adfuller(dataset, autolag = 'AIC')
+  sig_level = ['10%', '5%', '1%']
+  for sig in sig_level:
+    if dftest[0] > dftest[4][sig]:
+      reject = sig
+      result = False
+      break
+    else:
+      pass
+  if result == True:
+    result_text = 'Pass'
+  else:
+    result_text = 'Reject at ' + sig
+  return name + '　&　' + "{:.4f}".format(dftest[0]) + '　&　' + "{:.4f}".format(dftest[4]['1%']) 
+        + '　&　' + "{:.4f}".format(dftest[4]['5%']) + '　&　' + "{:.4f}".format(dftest[4]['10%'])
+        + '　&　' + result_text + "\\" +"\n"
+
+# Run the function and store the results in a txt file
+file = open("ADF_tabular.txt","w")
+for col in df_norm.columns:
+  file.writelines(ad_test(df_norm, col))
+file.close()
+
+# Take the First Difference for non-stationary processes
+## Take the features of non-stationary process
+non_stationary_feat = ['hospitalized', 'light-mid_symptoms', 'severe_symptoms', 'dead',
+                        'PCR_negative', 'tested_MA(7days)']
+df_copy = df[non_stationary_feat]
+
+## Take the first difference
+df_diff = df_copy.diff()
+df_diff = df_diff.dropna()
+
+## Redo the ADF test and store the results to a separate file
+file2 = open("ADF_tabular2.txt","w")
+for col in df_diff.columns:
+  file2.writelines(ad_test(df_diff, col))
+file2.close()
+
+# Make a single dataframe with all stationary features
+stat_cols = []
+for col in df.columns:
+  if col not in non_stationary_feat:
+    stat_cols.append(col)
+df_stat = df[stat_cols]
+newdata = pd.merge(df_stat, df_diff, on = 'date')
+newdata = newdata.reindex(columns = df.columns)
+\end{minted}
+
+\subsection{Multicollinearity}
+\begin{minted}[
+frame=lines,
+framesep=2mm,
+baselinestretch=1.2,
+fontsize=\footnotesize,
+linenos
+]{python}
+# Import modules
+from statsmodels.stats.outliers_influence import variance_inflation_factor as VIF
+
+# Prepare dataframe 
+newdf = newdata.copy()
+## Drop the objective function
+newdf = newdata.drop(columns = {'positive_rate'})
+
+# Define the VIF generator from a given dataframe 
+def VIF_operator(df):
+  X_variables = df.copy()
+  vif_data = pd.DataFrame()
+  vif_data["feature"] = df.columns
+  vif_data["VIF"] = [VIF(X_variables.values, i) for i in range(len(X_variables.columns))]
+  return vif_data
+
+# Run the function for dataframe
+vif1 = VIF_operator(newdf)
+
+# Store the results in txt file
+file2 = open('VIF_result1.txt', 'w')
+for i in range(11):
+  text = str(vif1.values[i][0]) + ' & ' + str(vif1.values[i][1]) + " \\" + "\\" + '\n'
+  file2.write(text)
+file2.close()
+
+# From the results drop identical features
+newdata1 = newdf.copy()
+newdata1 = newdata1.drop(columns = ['hospitalized', 'comparisonPreDeclare'])
+newdata1.index = pd.to_datetime(newdata1.index)
+
+# Recalculate VIF
+vif2 = VIF_operator(newdata1)
+
+#Store the results in txt file
+file3 = open('VIF_result2.txt', 'w')
+for i in range(9):
+  text = str(vif2.values[i][0]) + ' & ' + str(vif2.values[i][1]) + " \\" + "\\" + '\n'
+  file3.write(text)
+file3.close()
+
+# Store the Pre-processed data set to a csv file
+## Get the dataframe which includes the objective function
+positive = df.loc[df['positive_rate', 'comparisonPreDeclare']]
+df_master_final = pd.merge(positive, newdata1, on = 'date')
+## Drop unnecessary column
+df_master_final = df_master_final.drop(columns={'comparisonPreDeclare'})
+## store the result to "df_master_final.csv"
+df_master_final.to_csv('df_master_final.csv')
+\end{minted}
+
+\section{Conventional Model}
+\subsection{ARMA model}
+\begin{minted}[
+frame=lines,
+framesep=2mm,
+baselinestretch=1.2,
+fontsize=\footnotesize,
+linenos
+]{python}
+# Import necessary modules
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from pmdarima import auto_arima
+import warnings
+from statsmodels.tsa.arima.model import ARIMA
+from copy import deepcopy as dc
+from sklearn.metrics import mean_squared_error
+from math import sqrt
+plt.rcParams["font.family"] = "serif"
+% matplotlib inline
+warnings.filterwarnings('ignore')
+
+# Read data
+df = pd.read_csv('df_master_final.csv', index_col='date')
+df.index = pd.to_datetime(df.index)
+
+# Calculate the lags using 'auto_arima' module
+## Optimal lags will be calculated which minimizes the AIC
+stepwise_fit = auto_arima(df['Positive\_Rate'], trace=True, suppress_warnings = True)
+stepwise_fit.summary()
+
+# 40 days prediction
+## Split dataset
+train40 = df.iloc[:-40]
+test40 = df.iloc[-40:]
+model = ARIMA(train40['Positive\_Rate'], order = (2, 1, 2))
+model = model.fit()
+
+## Make a prediction and store to a dataframe
+start = len(train40)
+end  = len(df)
+pred = model.predict(start=start, end=end-1, typ='levels')
+pred.index = df.index[start:end+1]
+df_pred = pd.DataFrame(pred)
+df_pred = df_pred.rename(columns={'predicted_mean': 'Positive\_Rate'})
+
+# Make a line graph of the prediction
+## Prepare the dataframes
+df_plot = df[df.columns[0]]
+df_pred_prev = pd.DataFrame(df_plot[-100:-40])
+df_plot = pd.DataFrame(df_plot[-100:])
+df_pred_plot = pd.concat([df_pred_prev, df_pred])
+
+# Caclate the RMSE
+rmse = sqrt(mean_squared_error(df_pred, test40['Positive\_Rate']))
+
+## Generate graph
+ax = df_plot.plot(figsize=(10,8), legend=True)
+df_pred_plot.plot(ax=ax, figsize=(10,8), legend=True)
+plt.xlabel('Timestamps')
+plt.ylabel('Positive Rate')
+plt.legend(['Predicted','Observed'])
+### save figure
+plt.savefig('ARIMA(2,1,2)_40Days.png', dpi=100)
+\end{minted}
+
+
+\subsection{VARMA model}
+\begin{minted}[
+frame=lines,
+framesep=2mm,
+baselinestretch=1.2,
+fontsize=\footnotesize,
+linenos
+]{python}
+# Import modules
+from statsmodels.tsa.statespace.varmax import VARMAX
+from pmdarima import auto_arima
+from sklearn import metrics
+from timeit import default_timer as timer
+import warnings
+warnings.filterwarnings("ignore")
+
+# Prepare the used dataframe
+df1 = pd.read_csv('df_master_final.csv', index_col='date')
+df1.index = pd.to_datetime(df1.index)
+data = df1.copy()
+## Drop some columns to truncate the calculation time necessary for VARMA modelling
+data = data.drop(columns={'Dead', 'PCR_negative', 'ComparisonPreDay', 'Tested\_MA(7days)',
+                          'Light-Mid\_Symptoms', 'Severe\_Symptoms'})]
+
+# Define a function which shows the evaluation metric
+def timeseries_evaluation_metrics_func(y_true, y_pred):    
+    def mean_absolute_percentage_error(y_true, y_pred): 
+        y_true, y_pred = np.array(y_true), np.array(y_pred)
+        return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    print('Evaluation metric results:-')
+    print(f'MSE is : {metrics.mean_squared_error(y_true, y_pred)}')
+    print(f'MAE is : {metrics.mean_absolute_error(y_true, y_pred)}')
+    print(f'RMSE is : {np.sqrt(metrics.mean_squared_error(y_true, y_pred))}')
+    print(f'MAPE is : {mean_absolute_percentage_error(y_true, y_pred)}')
+    print(f'R2 is : {metrics.r2_score(y_true, y_pred)}',end='\n\n')
+
+# Define a function which takes the inverse of a given column in a dataframe
+def inverse_diff(actual_df, pred_df):
+    df_res = pred_df.copy()
+    columns = actual_df.columns
+    for col in columns: 
+        df_res[str(col)+'_1st_inv_diff'] = actual_df[col].iloc[-1] + df_res[str(col)].cumsum()
+    return df_res
+
+# 40Days Prediction
+X = data.copy()
+train, test = X[0:-40], X[-40:]
+cols = list(train.columns)
+
+## Get the lag length by calculating the AIC for all the used features
+pq = []
+for name, column in train[['Positive\_Rate', 'Discharged', 
+                           'PCR\_Positive','ComparisonPreSpread']].iteritems():
+    print(f'Searching order of p and q for : {name}')
+    stepwise_model = auto_arima(train[name],start_p=1, start_q=1,max_p=10, max_q=10, seasonal=False,
+        trace=True,error_action='ignore',suppress_warnings=True, stepwise=True,maxiter=1000)
+    parameter = stepwise_model.get_params().get('order')
+    print(f'optimal order for:{name} is: {parameter} \n\n')
+    pq.append(stepwise_model.get_params().get('order'))
+
+## VARMA modelling for the calculated lags and show the RMSE for the predicted results
+df_results_moni = pd.DataFrame()
+for i in pq:
+    if i[0]== 0 and i[2] ==0:
+        pass
+    else:
+        print(f' Running for {i}')
+        model = VARMAX(train[['Positive\_Rate', 'Discharged', 'PCR\_Positive', 
+                              'ComparisonPreSpread']], order=(i[0],i[2])).fit(disp=False)
+        result = model.forecast(steps = 40)
+        inv_res = inverse_diff(data[['Positive\_Rate', 'Discharged', 'PCR\_Positive',
+                                     'ComparisonPreSpread']] , result)
+        rmse = np.sqrt(metrics.mean_squared_error(test['Positive\_Rate'], inv_res['Positive\_Rate']))
+        df_results_moni = df_results_moni.append({'p': i[0], 'q': i[2],
+                                                  'RMSE Positive Rate':rmse}, ignore_index=True)
+
+## Sort the models in descending order according to the RMSE
+df_results_moni.sort_values(by = ['RMSE Positive Rate'])
+
+## We use the VARMA model which gives the least RMSE value
+model = VARMAX(train[['Positive\_Rate', 'Discharged', 'PCR\_Positive',
+                      'ComparisonPreSpread']], order=(2,3)).fit( disp=False)
+result = model.forecast(steps = 40)
+res = inverse_diff(data[['Positive\_Rate', 'Discharged', 'PCR\_Positive','ComparisonPreSpread']],result)
+df_pred = pd.DataFrame(res['Positive\_Rate'])
+original = pd.DataFrame(df1['Positive\_Rate'][-100:])
+## Get the RMSE of the predicted values
+rmse = sqrt(mean_squared_error(df_pred, original[-40:]))
+## Prepare the dataframe to plot
+original_pred = pd.DataFrame(df1['Positive\_Rate'][-100:-40])
+df_pred_plot = pd.concat([original_pred, df_pred])
+
+## plot the prediction data
+ax = original.plot(legend=True)
+df_pred_plot.plot(ax = ax, legend=True)
+plt.legend(['Real Data', 'Predicted Data'])
+plt.xlabel('Timestamp')
+plt.ylabel('Positive Rate')
+### save the figure
+plt.savefig('VARMA(2,3)_40Days.png', dpi=100)
+\end{minted}
+
+\section{Neural Networks}
+\subsection{Univariate Prediction}
+\begin{minted}[
+frame=lines,
+framesep=2mm,
+baselinestretch=1.2,
+fontsize=\footnotesize,
+linenos
+]{python}
+# Importing the libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import Dense, LSTM, Dropout, GRU, LeakyReLU
+from tensorflow.keras.optimizers import SGD
+import math
+from sklearn.metrics import mean_squared_error
+
+# Preparing data
+df = pd.read_csv('df_master_final.csv', index_col='date')
+df.index = pd.to_datetime(df.index)
+
+# Some functions to help out with
+def plot_predictions(test, predicted, name):
+    figure_name = str(name)+'.png'
+    plt.plot(test,label='Real Positive Rate')
+    plt.plot(predicted,label='Predicted Positive Rate')
+    plt.xlabel('Timestamp')
+    plt.ylabel('Positive Rate')
+    plt.legend()
+    plt.savefig(figure_name, dpi=100)
+
+def return_rmse(test,predicted):
+    rmse = math.sqrt(mean_squared_error(test, predicted))
+    print("The root mean squared error is {}.".format(rmse))
+
+# LSTM 40 Days
+
+## Preparing data
+### Splitting data
+training_set = np.array(df['Positive\_Rate'][:-40])
+training_set = training_set.reshape(-1, 1)
+test_set = np.array(df['Positive\_Rate'][-40:])
+test_set = test_set.reshape(-1, 1)
+limit = len(training_set)
+### Scaling the training set
+sc = MinMaxScaler(feature_range=(0,1))
+training_set_scaled = sc.fit_transform(training_set)
+### We create a data structure with 15 timesteps and 1 output
+X_train = []
+y_train = []
+memory_days = 15
+for i in range(memory_days, limit):
+    X_train.append(training_set_scaled[i-10:i,0])
+    y_train.append(training_set_scaled[i,0])
+X_train, y_train = np.array(X_train), np.array(y_train)
+### Reshaping X_train for efficient modelling
+X_train = np.reshape(X_train, (X_train.shape[0],X_train.shape[1],1))
+
+## The LSTM architecture
+regressor40 = Sequential()
+### First LSTM layer with Dropout regularisation
+regressor40.add(LSTM(units=128, return_sequences=True, input_shape=(X_train.shape[1],1)))
+regressor40.add(LeakyReLU(alpha=0.181818))
+regressor40.add(Dropout(0.4))
+### Second LSTM layer
+regressor40.add(LSTM(units=256, return_sequences=True))
+regressor40.add(LeakyReLU(alpha=0.181818))
+regressor40.add(Dropout(0.4))
+### Third LSTM layer
+regressor40.add(LSTM(units=128, return_sequences=True))
+regressor40.add(LeakyReLU(alpha=0.181818))
+regressor40.add(Dropout(0.4))
+### Fourth LSTM layer
+regressor40.add(LSTM(units=64))
+regressor40.add(LeakyReLU(alpha=0.181818))
+regressor40.add(Dropout(0.4))
+### The output layer
+regressor40.add(Dense(units=1))
+### Compiling the RNN
+regressor40.compile(optimizer='adam',loss='mean_squared_error')
+### Fitting to the training set
+history40 = regressor40.fit(X_train,y_train,epochs=500,batch_size=32, validation_split=0.1)
+
+## Plot the accuracy preformance results
+plt.plot(history40.history['loss'], label='Training loss')
+plt.plot(history40.history['val_loss'], label='Validation loss')
+plt.xlabel('Epochs')
+plt.ylabel('MSE')
+plt.legend()
+plt.savefig('LSTM_Uni_40Days_Training.png', dpi=100)
+
+## Prepare prediction
+dataset_total = pd.concat((df[:-40]['Positive\_Rate'],df[-40:]['Positive\_Rate']),axis=0)
+inputs = dataset_total[len(dataset_total)- len(test_set) - memory_days:].values
+inputs = inputs.reshape(-1,1)
+inputs = sc.transform(inputs)
+X_test = []
+for i in range(memory_days,40+memory_days):
+    X_test.append(inputs[i-10:i,0])
+X_test = np.array(X_test)
+X_test = np.reshape(X_test, (X_test.shape[0],X_test.shape[1], 1))
+
+## Store the prediction results to a dataframe
+predicted_positive_rate = regressor40.predict(X_test)
+predicted_positive_rate = sc.inverse_transform(predicted_positive_rate)
+pred = predicted_positive_rate.copy()
+pred.reshape(40)
+date = pd.date_range('2021-11-21', '2021-12-30')
+df_pred = pd.DataFrame(pred)
+df_pred.index = date
+df_pred.index.name = 'date'
+df_pred = df_pred.rename(columns={'[0]':'Predicted_Positive\_Rate'})
+
+## Evaluating our LSTM model
+test_test = pd.DataFrame(df['Positive\_Rate'][-100:])
+train_test = df['Positive\_Rate'][:-40]
+pred_test1 = pd.concat([train_test, df_pred])
+pred_test = pred_test1[-100:]
+test_array = np.array(test_test)
+pred_array = np.array(pred_test)
+return_rmse(test_array, pred_array)
+
+## Visualizing the results for LSTM
+plot_predictions(test_test, pred_test, 'LSTM_Uni_40Days')
+
+# GRU 40 Days
+## The GRU architecture
+regressorG40 = Sequential()
+
+### First GRU layer with Dropout regularisation
+regressorG40.add(GRU(units=128, return_sequences=True, input_shape=(X_train.shape[1],1)))
+regressorG40.add(LeakyReLU(alpha=0.181818))
+regressorG40.add(Dropout(0.4))
+
+### Second GRU layer
+regressorG40.add(GRU(units=256, return_sequences=True))
+regressorG40.add(LeakyReLU(alpha=0.181818))
+regressorG40.add(Dropout(0.4))
+
+### Third GRU layer
+regressorG40.add(GRU(units=128, return_sequences=True))
+regressorG40.add(LeakyReLU(alpha=0.181818))
+regressorG40.add(Dropout(0.4))
+
+### Fourth GRU layer
+regressorG40.add(GRU(units=64))
+regressorG40.add(LeakyReLU(alpha=0.181818))
+regressorG40.add(Dropout(0.4))
+
+### The output layer
+regressorG40.add(Dense(units=1))
+
+### Compiling the RNN
+regressorG40.compile(optimizer='adam',loss='mean_squared_error')
+
+### Fitting to the training set
+historyG40 = regressorG40.fit(X_train,y_train,epochs=500,batch_size=32, validation_split=0.1)
+
+## Plot the accuracy preformance results
+plt.plot(historyG40.history['loss'], label='Training loss')
+plt.plot(historyG40.history['val_loss'], label='Validation loss')
+plt.xlabel('Epochs')
+plt.ylabel('MSE')
+plt.legend()
+plt.savefig('GRU_Uni_40Days_Training.png', dpi=100)
+
+## Predicting values
+predicted_positive_rateG = regressorG40.predict(X_test)
+predicted_positive_rateG = sc.inverse_transform(predicted_positive_rateG)
+predG = predicted_positive_rateG.copy()
+predG.reshape(40)
+predG = pd.date_range('2021-11-21', '2021-12-30')
+df_predG = pd.DataFrame(predG)
+df_predG.index = date
+df_predG.index.name = 'date'
+df_predG = df_predG.rename(columns={'[0]':'Predicted_Positive\_Rate'})
+
+## Evaluating our GRU model
+test_test = pd.DataFrame(df['Positive\_Rate'][-100:])
+train_test = df['Positive\_Rate'][:-40]
+pred_test1 = pd.concat([train_test, df_predG])
+pred_test = pred_test1[-100:]
+test_array = np.array(test_test)
+pred_array = np.array(pred_test)
+return_rmse(test_array, pred_array)
+
+## Visualizing the results for GRU
+plot_predictions(test_test, pred_test, 'GRU_Uni_40Days')
+\end{minted}
+
+\subsection{Multivariate Prediction}
+\begin{minted}[
+frame=lines,
+framesep=2mm,
+baselinestretch=1.2,
+fontsize=\footnotesize,
+linenos
+]{python}
+# Import modules
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error
+from math import sqrt
+import matplotlib.pyplot as plt
+from matplotlib.pyplot import figure
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout, LeakyReLU
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
+plt.rcParams["font.family"] = "serif"
+% matplotlib inline
+
+# Prepare dataframes
+df1 = pd.read_csv(path +'df_master_final.csv', index_col='date')
+df1.index = pd.to_datetime(df1.index)
+df = df1.copy()
+## Drop if modification are made
+#df = df.drop(columns={'Dead', 'PCR_negative', 'ComparisonPreDay', 'Tested\_MA(7days)', 
+                      #'Light-Mid\_Symptoms', 'ComparisonPreSpread', 'Severe\_Symptoms'})
+
+# 40 Days Prediction LSTM (Multivariate)
+## Split data
+df_training = df[:-40].copy()
+df_master = df.copy()
+
+## Separate dates for future plotting
+train_dates = pd.DataFrame(df_training.index)
+predict_period_dates = pd.DataFrame(df_master[-40:].index)
+
+## Variables for training
+cols = list(df_master)[0:10]
+
+## Plot the used data features
+df_for_training = df_training[cols].astype(float)
+df_for_plot=df_for_training.tail(100)
+df_for_plot.plot.line()
+
+## normalize the dataset
+scaler = StandardScaler()
+scaler = scaler.fit(df_for_training)
+df_for_training_scaled = scaler.transform(df_for_training)
+
+## Prepare training data
+trainX = []
+trainY = []
+### Number of days we look into the future and the past days we use to predict the future
+n_future = 1
+n_past = 14 
+### Reformat input data into a shape
+for i in range(n_past, len(df_for_training_scaled) - n_future +1):
+    trainX.append(df_for_training_scaled[i - n_past:i, 0:df_for_training.shape[1]])
+    trainY.append(df_for_training_scaled[i + n_future - 1:i + n_future, 0])
+trainX, trainY = np.array(trainX), np.array(trainY)
+
+## define the LSTM model
+model40 = Sequential()
+
+### First Layer
+model40.add(LSTM(128, input_shape=(trainX.shape[1], trainX.shape[2]), return_sequences=True))
+model40.add(LeakyReLU(alpha=0.181818))
+model40.add(Dropout(0.4))
+
+### Second Layer
+model40.add(LSTM(512, return_sequences=True))
+model40.add(LeakyReLU(alpha=0.181818))
+model40.add(Dropout(0.4))
+
+### Third Layer
+model40.add(LSTM(256, return_sequences=True))
+model40.add(LeakyReLU(alpha=0.181818))
+model40.add(Dropout(0.4))
+
+### Fourth Layer
+model40.add(LSTM(64, return_sequences=False))
+model40.add(LeakyReLU(alpha=0.181818))
+model40.add(Dropout(0.4))
+
+### Output Layer
+model40.add(Dense(trainY.shape[1]))
+
+### Compile
+model40.compile(optimizer='adam', loss='mse')
+
+### Fit the model
+history40 = model40.fit(trainX, trainY, epochs=500, batch_size=32, validation_split=0.1, verbose=1)
+
+## Plot the accuracy preformance results
+plt.plot(history40.history['loss'], label='Training loss')
+plt.plot(history40.history['val_loss'], label='Validation loss')
+plt.xlabel('Epochs')
+plt.ylabel('MSE')
+plt.legend()
+plt.savefig('LSTM_Mult_40Days_Training.png', dpi=100)
+
+## Make prediction
+n_past = 40
+n_days_for_prediction=40  
+prediction = model40.predict(trainX[-n_days_for_prediction:])
+prediction_copies = np.repeat(prediction, df_for_training.shape[1], axis=-1)
+y_pred_future = scaler.inverse_transform(prediction_copies)[:,0]
+### Convert the data into a dataframe
+df_forecast = pd.DataFrame({'date':predict_period_dates.values.T[0], 'Positive\_Rate':y_pred_future})
+df_forecast['date']=pd.to_datetime(df_forecast['date'])
+df_forecast.index = df_forecast['date']
+df_forecast = df_forecast.drop(columns={'date'})
+original = pd.DataFrame(df_master['Positive\_Rate'][-100:])
+original_pred = pd.DataFrame(df_master['Positive\_Rate'][-100:-40])
+df_pred_plot = pd.concat([original_pred, df_forecast])
+### Evaluate our LSTM model
+rmse = sqrt(mean_squared_error(df_forecast, original[-40:]))
+
+## Plot the prediction result
+sns.lineplot(data=original, x=original.index, y=original['Positive\_Rate'])
+sns.lineplot(data=df_pred_plot, x=df_pred_plot.index, y=df_pred_plot['Positive\_Rate'])
+plt.xlabel('Timestamp')
+plt.ylabel('Positive Rate')
+plt.legend(['Real Data', 'Predicted Data'])
+### Save figure
+plt.savefig('LSTM_Mult_40Days.png', dpi=100)
+
+# 40 Days Prediction GRU (Multivariate)
+## define the GRU model
+modelG40 = Sequential()
+
+### First Layer
+modelG40.add(GRU(128, input_shape=(trainX.shape[1], trainX.shape[2]), return_sequences=True))
+modelG40.add(LeakyReLU(alpha=0.181818))
+modelG40.add(Dropout(0.4))
+
+### Second Layer
+modelG40.add(GRU(512, return_sequences=True))
+modelG40.add(LeakyReLU(alpha=0.181818))
+modelG40.add(Dropout(0.4))
+
+### Third Layer
+modelG40.add(GRU(256, return_sequences=True))
+modelG40.add(LeakyReLU(alpha=0.181818))
+modelG40.add(Dropout(0.4))
+
+### Fourth Layer
+modelG40.add(GRU(64, return_sequences=False))
+modelG40.add(LeakyReLU(alpha=0.181818))
+modelG40.add(Dropout(0.4))
+
+### Output Layer
+modelG40.add(Dense(trainY.shape[1]))
+
+### Compile
+modelG40.compile(optimizer='adam', loss='mse')
+
+### Fit the model
+historyG40 = modelG40.fit(trainX, trainY, epochs=500, batch_size=32, validation_split=0.1, verbose=1)
+
+## Plot the accuracy preformance results
+plt.plot(historyG40.history['loss'], label='Training loss')
+plt.plot(historyG40.history['val_loss'], label='Validation loss')
+plt.xlabel('Epochs')
+plt.ylabel('MSE')
+plt.legend()
+plt.savefig('GRU_Mult_40Days_Training.png', dpi=100)
+
+## Make prediction
+n_past = 40
+n_days_for_prediction=40  
+predictionG = modelG40.predict(trainX[-n_days_for_prediction:])
+prediction_copies = np.repeat(predictionG, df_for_training.shape[1], axis=-1)
+y_pred_future = scaler.inverse_transform(prediction_copies)[:,0]
+### Convert the data into a dataframe
+df_forecast = pd.DataFrame({'date':predict_period_dates.values.T[0], 'Positive\_Rate':y_pred_future})
+df_forecast['date']=pd.to_datetime(df_forecast['date'])
+df_forecast.index = df_forecast['date']
+df_forecast = df_forecast.drop(columns={'date'})
+original = pd.DataFrame(df_master['Positive\_Rate'][-100:])
+original_pred = pd.DataFrame(df_master['Positive\_Rate'][-100:-40])
+df_pred_plot = pd.concat([original_pred, df_forecast])
+### Evaluate our LSTM model
+rmse = sqrt(mean_squared_error(df_forecast, original[-40:]))
+
+## Plot the prediction result
+sns.lineplot(data=original, x=original.index, y=original['Positive\_Rate'])
+sns.lineplot(data=df_pred_plot, x=df_pred_plot.index, y=df_pred_plot['Positive\_Rate'])
+plt.xlabel('Timestamp')
+plt.ylabel('Positive Rate')
+plt.legend(['Real Data', 'Predicted Data'])
+### Save figure
+plt.savefig('GRU_Mult_40Days.png', dpi=100)
+\end{minted}
+\end{appendices}
